@@ -14,6 +14,8 @@ import requests
 import json
 from bs4 import BeautifulSoup
 from xml.dom import minidom
+from pydantic import EmailStr
+from threading import Event
 
 
 logging.basicConfig(level=logging.INFO,
@@ -23,6 +25,7 @@ case_execution_data = {}
 # pasar por conf
 engine = create_engine(
     'postgresql://robomatic:robomatic@localhost:5432/test_executor')
+event = Event()
 
 
 class TestExecutorService:
@@ -43,6 +46,15 @@ class TestExecutorService:
         with ThreadPoolExecutor(max_workers=excecuteObject['threads']) as executor:
             futures = {executor.submit(
                 executeCase, script, row): row for row in data.iterrows()}
+            for future in futures:
+                print([f._state for f in futures])
+                if future.cancelled():
+                    continue
+                with engine.connect() as connection:
+                    query = "SELECT * FROM test_executor.evidence_file as e WHERE e.file_name = '" + test_execution_data['test_execution_id'] + "'"
+                    result = connection.execute(text(query)).first()
+                    if result:
+                        executor.shutdown(wait=False, cancel_futures=True)
         executor.shutdown(wait=True)
 
         # crear los archivos de evidencias globales
@@ -50,8 +62,15 @@ class TestExecutorService:
         # enviar datos de la ejecución al core
         sendqueue("tasks.update_test_execution", test_execution_data)
 
+    @staticmethod
+    def stop_test(testExecution):
+        print("stopping test")
+        with engine.connect() as connection:
+            query = "INSERT INTO test_executor.stop_execution (execution_id) VALUES('"+testExecution['test_execution_id']+"')"
+            connection.execute(text(query))
+
 def executeCase(script: str, data):
-    try:
+    try:    
         print('execute case 1')
         print(data)
         (l, caseData) = data
@@ -80,7 +99,7 @@ def executeCase(script: str, data):
         print(format(e))
         #current_app.logger.error('Case execution failed: ' + e.with_traceback)
         case_execution_data['status'] = "Failed"
-        test_execution_data['status'] = "Failed"
+        test_execution_data['status'] = "failed"
         writeGlobalEvidence(
             test_execution_data['test_execution_id'] + "_failed_cases",  str(e.with_traceback))
     # crear archivos de evidencias unitarios
@@ -173,7 +192,7 @@ def sleep(s):
 def assertion(boul, message):
     if not boul:
         case_execution_data['status'] = "Failed"
-        test_execution_data['status'] = "Failed"
+        test_execution_data['status'] = "failed"
         logging.error(message)
         writeCaseEvidence(
             test_execution_data['test_execution_id'] + "_failed_assertions",  message)
@@ -245,3 +264,23 @@ def responseMapper(response, request):
     print('typo de body es: ' + str(type(body)))
     response['body'] = body
     return response
+
+def sendMail(mails, subject, body, files, template_id):
+    mail_array = mails.split(',')
+    print("------------------------------" + str(type(body)) + "-----------------------------")
+    if str(type(body)) == "<class 'str'>":
+        body_dict = None
+        body_str = body
+    else:
+        body_dict = body
+        body_str = ""
+    file_array = files.split(',')
+    message = {
+        "email": mail_array,
+        "subject": subject,
+        "body": body_str,
+        "body_dict": body_dict,
+        "template_id": template_id,
+        "files": file_array
+    }
+    sendqueue("tasks.send_mail", message)

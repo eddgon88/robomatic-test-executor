@@ -4,8 +4,10 @@ import os
 from flask import Flask
 from flask_sqlalchemy import SQLAlchemy
 from .test_executor.services.TestExecutorService import TestExecutorService
+from .jms.jms_client import PikaClient
 import pika
 import ast
+import asyncio
 
 db = SQLAlchemy()
 
@@ -20,15 +22,30 @@ def make_pika():
         content = ast.literal_eval(body_str)        
         print(content)
         TestExecutorService.executeTest(content)
+
+    def stop_test_execution(ch, method, properties, body):
+        body_str = body.decode("UTF-8")
+        content = ast.literal_eval(body_str)        
+        print(content)
+        TestExecutorService.stop_test(content)
     
     channel.basic_consume('tasks.execute_test',
     execute_test,
+    auto_ack=True)
+
+    channel.basic_consume('tasks.stop_test_execution',
+    stop_test_execution,
     auto_ack=True)
 
     # start consuming (blocks)
     channel.start_consuming()
     connection.close()
 
+async def make_pika_listener():
+    loop = asyncio.get_running_loop()
+    pikaClient = PikaClient(TestExecutorService.executeTest)
+    task = loop.create_task(pikaClient.consume(loop))
+    await task
 
 def create_app():    
     app = Flask(__name__)
